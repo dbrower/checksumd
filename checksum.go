@@ -15,12 +15,8 @@ import (
 	"sync"
 )
 
-type stats struct {
-}
-
 var (
-	fileList chan string = make(chan string, 10)
-	totals   struct {
+	totals struct {
 		m         sync.Mutex
 		byteCount int
 		fileCount int
@@ -41,20 +37,21 @@ const (
 
 // Update the global stats. Expects to be called once per file.
 // The fileStatus is one of the Chk* constants.
-func updateStats(fileStatus int) {
-	totals.m.Lock()
-	defer totals.m.Unlock()
-	totals.fileCount += 1
-	switch fileStatus {
-	case ChkMatch:
-		totals.matches += 1
-	case ChkAdd:
-		totals.added += 1
-	case ChkConflict:
-		totals.conflicts += 1
-	case ChkError:
-		totals.errors += 1
+func updateStats(update <-chan int, wg *sync.WaitGroup) {
+	for fileStatus := range update {
+		totals.fileCount += 1
+		switch fileStatus {
+		case ChkMatch:
+			totals.matches += 1
+		case ChkAdd:
+			totals.added += 1
+		case ChkConflict:
+			totals.conflicts += 1
+		case ChkError:
+			totals.errors += 1
+		}
 	}
+	wg.Done()
 }
 
 // Checksum a file by name.
@@ -83,13 +80,13 @@ func checksumFile(name string) (string, error) {
 // If there is already a file with that name, then the calculated
 // checksum is compared with the contents of the file. Mismatches
 // are displayed to stdout.
-func validateFiles(source <-chan string, wg *sync.WaitGroup) {
+func validateFiles(source <-chan string, stats chan<- int, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for path := range source {
 		s, err := checksumFile(path)
 		if err != nil {
 			fmt.Println(err)
-			updateStats(ChkError)
+			stats <- ChkError
 			continue
 		}
 
@@ -99,51 +96,59 @@ func validateFiles(source <-chan string, wg *sync.WaitGroup) {
 			// create a new checksum file
 			fmt.Printf("A %s\t%s\n", s, path)
 			ioutil.WriteFile(csFilename, []byte(s), 0444)
-			updateStats(ChkAdd)
+			stats <- ChkAdd
 			continue
 		}
 		storedChecksum, err := ioutil.ReadFile(csFilename)
 		switch {
 		case err != nil:
 			fmt.Printf("  Error: %s: %s\n", err.Error(), path)
-			updateStats(ChkError)
+			stats <- ChkError
 		case s != string(storedChecksum):
 			// Checksum mismatch.
 			fmt.Printf("C %s\t%s\t%s\n", s, storedChecksum, path)
-			updateStats(ChkConflict)
+			stats <- ChkConflict
 		default:
-			updateStats(ChkMatch)
+			stats <- ChkMatch
 		}
 	}
 }
 
-func checksumFileWalk(path string, info os.FileInfo, err error) error {
-	if err == nil &&
-		info.Mode().IsRegular() &&
-		filepath.Ext(path) != ".md5" {
-		fileList <- path
-	}
-	return nil
-}
-
 func main() {
-	var n int
-	var wg sync.WaitGroup
+	var (
+		fileList = make(chan string, 10)
+		stats    = make(chan int, 100)
+		n        int
+		wg       sync.WaitGroup
+		statswg  sync.WaitGroup
+	)
 
 	flag.IntVar(&n, "n", 10, "Size of worker pool")
 	flag.Parse()
 
 	for i := 0; i < n; i++ {
 		wg.Add(1)
-		go validateFiles(fileList, &wg)
+		go validateFiles(fileList, stats, &wg)
 	}
+	statswg.Add(1)
+	go updateStats(stats, &statswg)
 
-	err := filepath.Walk(".", checksumFileWalk)
+	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+		if err == nil &&
+			info.Mode().IsRegular() &&
+			filepath.Ext(path) != ".md5" {
+			fileList <- path
+		}
+		return nil
+	})
+
 	if err != nil {
 		fmt.Println(err)
 	}
 	close(fileList)
 	wg.Wait()
+	close(stats)
+	statswg.Wait()
 	fmt.Printf("%d files (%d bytes) scanned: ", totals.fileCount, totals.byteCount)
 	fmt.Printf("%d matches, %d added, %d conflicts, %d errors\n", totals.matches, totals.added, totals.conflicts, totals.errors)
 }
