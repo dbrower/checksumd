@@ -32,17 +32,20 @@ var (
 )
 
 const (
-	ChkMatch    = 1
-	ChkAdd      = 2
-	ChkConflict = 3
-	ChkError    = 4
+	// Constants used by updateStats
+	ChkMatch = iota
+	ChkAdd
+	ChkConflict
+	ChkError
 )
 
-func updateStats(what int) {
+// Update the global stats. Expects to be called once per file.
+// The fileStatus is one of the Chk* constants.
+func updateStats(fileStatus int) {
 	totals.m.Lock()
 	defer totals.m.Unlock()
 	totals.fileCount += 1
-	switch what {
+	switch fileStatus {
 	case ChkMatch:
 		totals.matches += 1
 	case ChkAdd:
@@ -54,6 +57,10 @@ func updateStats(what int) {
 	}
 }
 
+// Checksum a file by name.
+// Will open the file and return the md5 sum
+// of the file, serialized as a hexadecimal ascii string.
+// An error is returned if there are problems opening or reading the file.
 func checksumFile(name string) (string, error) {
 	f, err := os.Open(name)
 	if err != nil {
@@ -71,6 +78,11 @@ func checksumFile(name string) (string, error) {
 	return result, err
 }
 
+// validateFiles will pull file names from source and checksum them.
+// The checksums are stored in the file name with an ".md5" suffix.
+// If there is already a file with that name, then the calculated
+// checksum is compared with the contents of the file. Mismatches
+// are displayed to stdout.
 func validateFiles(source <-chan string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for path := range source {
@@ -91,14 +103,15 @@ func validateFiles(source <-chan string, wg *sync.WaitGroup) {
 			continue
 		}
 		storedChecksum, err := ioutil.ReadFile(csFilename)
-		if err != nil {
+		switch {
+		case err != nil:
 			fmt.Printf("  Error: %s: %s\n", err.Error(), path)
 			updateStats(ChkError)
-		} else if s != string(storedChecksum) {
+		case s != string(storedChecksum):
 			// Checksum mismatch.
 			fmt.Printf("C %s\t%s\t%s\n", s, storedChecksum, path)
 			updateStats(ChkConflict)
-		} else {
+		default:
 			updateStats(ChkMatch)
 		}
 	}
@@ -114,13 +127,13 @@ func checksumFileWalk(path string, info os.FileInfo, err error) error {
 }
 
 func main() {
-	var numproc int
+	var n int
 	var wg sync.WaitGroup
 
-	flag.IntVar(&numproc, "n", 10, "Size of worker pool")
+	flag.IntVar(&n, "n", 10, "Size of worker pool")
 	flag.Parse()
 
-	for i := 0; i < numproc; i++ {
+	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go validateFiles(fileList, &wg)
 	}
